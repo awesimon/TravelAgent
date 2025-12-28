@@ -1,0 +1,7 @@
+{
+  "name": "TravelGenie Map Planner",
+  "description": "A smart travel itinerary planner powered by Gemini and Google Maps Grounding. Chat with the AI to plan your perfect trip with real-time map data.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
