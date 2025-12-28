@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap, Polyline, Tooltip } from 'react-leaflet';
 import { Coordinates, Place, PlaceType } from '../types';
-import { Plus, Check, CalendarDays, Bed, Utensils, Bus, Camera, MapPin, Footprints } from 'lucide-react';
+import { Plus, Check, CalendarDays, Bed, Utensils, Bus, Footprints, Search, X, Loader2, MapPin } from 'lucide-react';
 import L from 'leaflet';
 
 // Use CDN URLs for default markers as fallback
@@ -151,15 +151,78 @@ const MapController: React.FC<{ center: Coordinates, places: Place[] }> = ({ cen
   }, [places, map]);
   
   useEffect(() => {
-      map.setView([center.lat, center.lng], 13);
+      // Only set view to user location on initial load if no places
+      if (places.length === 0) {
+        map.setView([center.lat, center.lng], 13);
+      }
   }, []); 
 
   return null;
 };
 
+// Component to handle flying to search result
+const SearchController: React.FC<{ place: Place | null }> = ({ place }) => {
+    const map = useMap();
+    useEffect(() => {
+        if (place) {
+            map.flyTo([place.lat, place.lng], 15, {
+                duration: 1.5,
+                easeLinearity: 0.25
+            });
+        }
+    }, [place, map]);
+    return null;
+};
+
 const MapComponent: React.FC<MapComponentProps> = ({ userLocation, places, itinerary, onAddToItinerary }) => {
   const defaultCenter = { lat: 51.505, lng: -0.09 };
   const center = userLocation || defaultCenter;
+
+  // Search State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [showResults, setShowResults] = useState(false);
+  const [searchMarker, setSearchMarker] = useState<Place | null>(null);
+
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    
+    setIsSearching(true);
+    setShowResults(true);
+    try {
+        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}`);
+        const data = await response.json();
+        setSearchResults(data);
+    } catch (err) {
+        console.error("Search failed", err);
+    } finally {
+        setIsSearching(false);
+    }
+  };
+
+  const handleSelectResult = (result: any) => {
+      const newPlace: Place = {
+          name: result.display_name.split(',')[0],
+          description: result.display_name,
+          lat: parseFloat(result.lat),
+          lng: parseFloat(result.lon),
+          type: 'landmark',
+          zoom: 15
+      };
+      setSearchMarker(newPlace);
+      setSearchResults([]);
+      setShowResults(false);
+      setSearchQuery(newPlace.name);
+  };
+
+  const clearSearch = () => {
+      setSearchQuery('');
+      setSearchResults([]);
+      setShowResults(false);
+      setSearchMarker(null);
+  };
 
   const { routeSegments, processedPlaces } = useMemo(() => {
     const grouped: Record<number, Place[]> = {};
@@ -172,7 +235,7 @@ const MapComponent: React.FC<MapComponentProps> = ({ userLocation, places, itine
         }
     });
     
-    // 2. Create Route Segments (for visual distinction of transit)
+    // 2. Create Route Segments
     const segments: RouteSegment[] = [];
 
     Object.entries(grouped).forEach(([dayStr, dayPlaces]) => {
@@ -186,7 +249,6 @@ const MapComponent: React.FC<MapComponentProps> = ({ userLocation, places, itine
             const p1 = sortedPlaces[i];
             const p2 = sortedPlaces[i+1];
             
-            // Logic: If p1 is transit, assume p1->p2 is transit
             const isTransit = p1.type === 'transit';
             
             segments.push({
@@ -215,142 +277,219 @@ const MapComponent: React.FC<MapComponentProps> = ({ userLocation, places, itine
   }, [places]);
 
   return (
-    <MapContainer 
-      center={[center.lat, center.lng]} 
-      zoom={13} 
-      style={{ height: '100%', width: '100%' }}
-      zoomControl={false}
-    >
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-      />
-      
-      <MapController center={center} places={places} />
-
-      {/* Routes Segments */}
-      {routeSegments.map((segment) => (
-         <React.Fragment key={segment.id}>
-             {/* White Halo for contrast */}
-             <Polyline 
-                positions={segment.positions}
-                pathOptions={{ 
-                    color: 'white', 
-                    weight: segment.isTransit ? 8 : 7, 
-                    opacity: 0.8,
-                    lineCap: 'round',
-                    lineJoin: 'round'
-                }}
-             />
-             {/* Actual Route Line */}
-             <Polyline 
-                positions={segment.positions}
-                pathOptions={{ 
-                    color: segment.color, 
-                    weight: segment.isTransit ? 5 : 4, 
-                    opacity: 1,
-                    // Solid line for transit, Dotted line for standard/walking
-                    // '1, 10' creates a nice dotted effect with lineCap: 'round'
-                    dashArray: segment.isTransit ? undefined : '1, 10', 
-                    lineCap: 'round'
-                }}
-             >
-                <Popup className="font-semibold text-sm">
-                   <div className="flex flex-col gap-1">
-                       <div className="flex items-center gap-2">
-                           {segment.isTransit ? (
-                               <>
-                                   <Bus size={14} className="text-gray-600"/>
-                                   <span>Public Transport</span>
-                               </>
-                           ) : (
-                               <>
-                                   <Footprints size={14} className="text-gray-600"/>
-                                   <span>Walking / Travel</span>
-                               </>
-                           )}
-                       </div>
-                       <span className="text-xs text-gray-500">Day {segment.day} Route</span>
-                   </div>
-                </Popup>
-             </Polyline>
-         </React.Fragment>
-      ))}
-
-      {/* User Location */}
-      {userLocation && (
-        <Marker position={[userLocation.lat, userLocation.lng]}>
-          <Popup>You are here</Popup>
-        </Marker>
-      )}
-
-      {/* Places */}
-      {processedPlaces.map((place, idx) => {
-        const isAdded = itinerary.some(p => p.name === place.name);
-        
-        // Color logic
-        let dayColor = '#666';
-        if (place.day) {
-            dayColor = ROUTE_COLORS[(place.day - 1) % ROUTE_COLORS.length];
-        }
-
-        const customIcon = createCustomIcon(place, place.dayIndex || 1, dayColor);
-
-        return (
-          <Marker key={`${place.name}-${idx}`} position={[place.lat, place.lng]} icon={customIcon}>
-            <Tooltip 
-                direction="bottom" 
-                offset={[0, 10]} 
-                opacity={1} 
-                permanent 
-                className="custom-tooltip"
-            >
-                <div className="font-bold text-xs text-gray-800 bg-white/95 px-2 py-0.5 rounded shadow-sm border border-gray-200 -mt-1 flex items-center gap-1">
-                    {place.day ? <span className="text-[10px] uppercase text-gray-400">D{place.day}</span> : null}
-                    {place.name}
-                </div>
-            </Tooltip>
-
-            <Popup>
-              <div className="p-1 min-w-[200px]">
-                {place.day && (
-                    <div 
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold text-white mb-2"
-                        style={{ backgroundColor: dayColor }}
-                    >
-                        <CalendarDays size={10} />
-                        Day {place.day} • {place.type === 'transit' ? 'Transit Node' : `Stop ${place.order || place.dayIndex}`}
-                    </div>
-                )}
-                <div className="flex items-center gap-2 mb-1">
-                     {place.type === 'hotel' && <Bed size={16} className="text-blue-600"/>}
-                     {place.type === 'food' && <Utensils size={16} className="text-orange-600"/>}
-                     {place.type === 'transit' && <Bus size={16} className="text-green-600"/>}
-                     <h3 className="font-bold text-gray-800">{place.name}</h3>
-                </div>
+    <div className="relative w-full h-full">
+        {/* Search Bar Overlay */}
+        <div 
+            className="absolute top-4 left-4 md:left-1/2 md:-translate-x-1/2 z-[1000] w-[calc(100%-2rem)] md:w-96 flex flex-col items-center"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onScroll={(e) => e.stopPropagation()}
+        >
+            <form onSubmit={handleSearch} className="relative w-full shadow-lg rounded-full">
+                <input 
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search for a city, landmark, or place..."
+                    className="w-full pl-10 pr-10 py-3 rounded-full border border-gray-200 bg-white/95 backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm shadow-sm transition-all text-gray-800 placeholder-gray-400"
+                />
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
                 
-                <p className="text-sm text-gray-600 mb-3 line-clamp-3">{place.description}</p>
-                <button 
-                  onClick={() => onAddToItinerary(place)}
-                  disabled={isAdded}
-                  className={`w-full py-1.5 px-3 rounded text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
-                    isAdded 
-                      ? 'bg-green-100 text-green-700 cursor-default' 
-                      : 'bg-blue-600 text-white hover:bg-blue-700'
-                  }`}
+                {searchQuery && (
+                    <button 
+                        type="button"
+                        onClick={clearSearch}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100"
+                    >
+                        <X size={14} />
+                    </button>
+                )}
+                
+                {isSearching && (
+                     <div className="absolute right-10 top-1/2 -translate-y-1/2">
+                        <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                     </div>
+                )}
+            </form>
+
+            {/* Search Results Dropdown */}
+            {showResults && searchResults.length > 0 && (
+                <div className="w-full mt-2 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden max-h-60 overflow-y-auto">
+                    {searchResults.map((result, idx) => (
+                        <button
+                            key={idx}
+                            onClick={() => handleSelectResult(result)}
+                            className="w-full text-left px-4 py-3 hover:bg-blue-50 border-b border-gray-50 last:border-none transition-colors flex items-start gap-2"
+                        >
+                            <MapPin className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />
+                            <div className="min-w-0">
+                                <div className="font-medium text-gray-800 text-sm truncate">{result.display_name.split(',')[0]}</div>
+                                <div className="text-xs text-gray-500 truncate">{result.display_name}</div>
+                            </div>
+                        </button>
+                    ))}
+                </div>
+            )}
+        </div>
+
+        <MapContainer 
+        center={[center.lat, center.lng]} 
+        zoom={13} 
+        style={{ height: '100%', width: '100%' }}
+        zoomControl={false}
+        onClick={() => setShowResults(false)}
+        >
+        <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        
+        <MapController center={center} places={places} />
+        <SearchController place={searchMarker} />
+
+        {/* Routes Segments */}
+        {routeSegments.map((segment) => (
+            <React.Fragment key={segment.id}>
+                {/* White Halo */}
+                <Polyline 
+                    positions={segment.positions}
+                    pathOptions={{ 
+                        color: 'white', 
+                        weight: segment.isTransit ? 8 : 7, 
+                        opacity: 0.8,
+                        lineCap: 'round',
+                        lineJoin: 'round'
+                    }}
+                />
+                {/* Actual Route */}
+                <Polyline 
+                    positions={segment.positions}
+                    pathOptions={{ 
+                        color: segment.color, 
+                        weight: segment.isTransit ? 5 : 4, 
+                        opacity: 1,
+                        dashArray: segment.isTransit ? '10, 10' : undefined, // Dashed for public transport
+                        lineCap: 'round'
+                    }}
                 >
-                  {isAdded ? (
-                    <><Check size={14} /> Added</>
-                  ) : (
-                    <><Plus size={14} /> Add to Itinerary</>
-                  )}
-                </button>
-              </div>
-            </Popup>
-          </Marker>
-        );
-      })}
-    </MapContainer>
+                    <Popup className="font-semibold text-sm">
+                    <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                            {segment.isTransit ? (
+                                <>
+                                    <Bus size={14} className="text-gray-600"/>
+                                    <span>Public Transport</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Footprints size={14} className="text-gray-600"/>
+                                    <span>Walking / Travel</span>
+                                </>
+                            )}
+                        </div>
+                        <span className="text-xs text-gray-500">Day {segment.day} Route</span>
+                    </div>
+                    </Popup>
+                </Polyline>
+            </React.Fragment>
+        ))}
+
+        {/* User Location */}
+        {userLocation && (
+            <Marker position={[userLocation.lat, userLocation.lng]}>
+            <Popup>You are here</Popup>
+            </Marker>
+        )}
+
+        {/* Search Marker (Distinctive) */}
+        {searchMarker && (
+            <Marker 
+                position={[searchMarker.lat, searchMarker.lng]}
+                icon={createCustomIcon({ ...searchMarker, order: 0, type: 'landmark' }, 0, '#ec4899')} // Pinkish color for search
+            >
+                <Popup>
+                    <div className="p-1">
+                        <div className="font-bold text-gray-800">{searchMarker.name}</div>
+                        <p className="text-xs text-gray-500 mb-2">Searched Location</p>
+                        <button 
+                            onClick={() => onAddToItinerary(searchMarker)}
+                            className="w-full py-1.5 px-3 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700 flex items-center justify-center gap-2"
+                        >
+                            <Plus size={14} /> Add to Itinerary
+                        </button>
+                    </div>
+                </Popup>
+            </Marker>
+        )}
+
+        {/* Trip Places */}
+        {processedPlaces.map((place, idx) => {
+            const isAdded = itinerary.some(p => p.name === place.name);
+            
+            let dayColor = '#666';
+            if (place.day) {
+                dayColor = ROUTE_COLORS[(place.day - 1) % ROUTE_COLORS.length];
+            }
+
+            const customIcon = createCustomIcon(place, place.dayIndex || 1, dayColor);
+
+            return (
+            <Marker key={`${place.name}-${idx}`} position={[place.lat, place.lng]} icon={customIcon}>
+                <Tooltip 
+                    direction="bottom" 
+                    offset={[0, 10]} 
+                    opacity={1} 
+                    permanent 
+                    className="custom-tooltip"
+                >
+                    <div className="font-bold text-xs text-gray-800 bg-white/95 px-2 py-0.5 rounded shadow-sm border border-gray-200 -mt-1 flex items-center gap-1">
+                        {place.day ? <span className="text-[10px] uppercase text-gray-400">D{place.day}</span> : null}
+                        {place.name}
+                    </div>
+                </Tooltip>
+
+                <Popup>
+                <div className="p-1 min-w-[200px]">
+                    {place.day && (
+                        <div 
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold text-white mb-2"
+                            style={{ backgroundColor: dayColor }}
+                        >
+                            <CalendarDays size={10} />
+                            Day {place.day} • {place.type === 'transit' ? 'Transit Node' : `Stop ${place.order || place.dayIndex}`}
+                        </div>
+                    )}
+                    <div className="flex items-center gap-2 mb-1">
+                        {place.type === 'hotel' && <Bed size={16} className="text-blue-600"/>}
+                        {place.type === 'food' && <Utensils size={16} className="text-orange-600"/>}
+                        {place.type === 'transit' && <Bus size={16} className="text-green-600"/>}
+                        <h3 className="font-bold text-gray-800">{place.name}</h3>
+                    </div>
+                    
+                    <p className="text-sm text-gray-600 mb-3 line-clamp-3">{place.description}</p>
+                    <button 
+                    onClick={() => onAddToItinerary(place)}
+                    disabled={isAdded}
+                    className={`w-full py-1.5 px-3 rounded text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+                        isAdded 
+                        ? 'bg-green-100 text-green-700 cursor-default' 
+                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                    }`}
+                    >
+                    {isAdded ? (
+                        <><Check size={14} /> Added</>
+                    ) : (
+                        <><Plus size={14} /> Add to Itinerary</>
+                    )}
+                    </button>
+                </div>
+                </Popup>
+            </Marker>
+            );
+        })}
+        </MapContainer>
+    </div>
   );
 };
 

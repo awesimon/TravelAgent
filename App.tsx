@@ -40,11 +40,15 @@ const App: React.FC = () => {
           });
         },
         (error) => {
-          console.error("Error getting location:", error);
+          console.warn(`Geolocation error: ${error.message} (Code: ${error.code})`);
           // Default to a known location if permission denied (e.g., San Francisco)
           setUserLocation({ lat: 37.7749, lng: -122.4194 });
-        }
+        },
+        { timeout: 10000, enableHighAccuracy: false }
       );
+    } else {
+        // Default if geolocation is not supported
+        setUserLocation({ lat: 37.7749, lng: -122.4194 });
     }
     
     // Handle responsive layout
@@ -121,20 +125,44 @@ const App: React.FC = () => {
     const userText = input.trim();
     setInput('');
     
-    const newMessage: Message = { role: 'user', text: userText };
-    setMessages(prev => [...prev, newMessage]);
+    // Add user message
+    setMessages(prev => [...prev, { role: 'user', text: userText }]);
     setIsLoading(true);
 
+    // Add placeholder for model response
+    setMessages(prev => [...prev, { role: 'model', text: '' }]);
+
     try {
-      const response = await sendMessageToGemini(messages, userText, userLocation || undefined);
+      const response = await sendMessageToGemini(
+        messages, // Pass history (excluding the placeholder we just added)
+        userText, 
+        userLocation || undefined,
+        (streamedText) => {
+            // Update the last message (the placeholder) with streamed text
+            setMessages(prev => {
+                const newHistory = [...prev];
+                const lastIdx = newHistory.length - 1;
+                if (newHistory[lastIdx].role === 'model') {
+                    newHistory[lastIdx] = { ...newHistory[lastIdx], text: streamedText };
+                }
+                return newHistory;
+            });
+        }
+      );
       
-      const botMessage: Message = {
-        role: 'model',
-        text: response.text,
-        groundingChunks: response.groundingChunks
-      };
-      
-      setMessages(prev => [...prev, botMessage]);
+      // Final update with clean text and grounding info
+      setMessages(prev => {
+          const newHistory = [...prev];
+          const lastIdx = newHistory.length - 1;
+          if (newHistory[lastIdx].role === 'model') {
+               newHistory[lastIdx] = {
+                   role: 'model',
+                   text: response.text,
+                   groundingChunks: response.groundingChunks
+               };
+          }
+          return newHistory;
+      });
       
       // Update map markers if places were returned
       if (response.places && response.places.length > 0) {
@@ -145,7 +173,21 @@ const App: React.FC = () => {
         }
       }
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'model', text: "Sorry, I encountered an error connecting to the travel service. Please try again.", isError: true }]);
+      // Handle error by replacing the placeholder or adding error message
+      setMessages(prev => {
+          const newHistory = [...prev];
+          const lastIdx = newHistory.length - 1;
+          if (newHistory[lastIdx].role === 'model' && !newHistory[lastIdx].isError) {
+              newHistory[lastIdx] = { 
+                  role: 'model', 
+                  text: "Sorry, I encountered an error connecting to the travel service. Please try again.", 
+                  isError: true 
+              };
+          } else {
+              newHistory.push({ role: 'model', text: "Sorry, I encountered an error connecting to the travel service. Please try again.", isError: true });
+          }
+          return newHistory;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -183,9 +225,9 @@ const App: React.FC = () => {
             onAddToItinerary={addToItinerary}
         />
         
-        {/* Weather Widget (Top Left, below title) */}
+        {/* Weather Widget (Top Left, below search) */}
         {weatherCoordinates && (
-            <div className="absolute top-16 left-4 z-[400]">
+            <div className="absolute top-20 left-4 z-[400] md:left-1/2 md:-translate-x-1/2 md:top-[4.5rem]">
                 <WeatherWidget lat={weatherCoordinates.lat} lng={weatherCoordinates.lng} />
             </div>
         )}
@@ -290,12 +332,6 @@ const App: React.FC = () => {
                 <MessageSquare className="w-6 h-6" />
              </button>
         </div>
-        
-        {/* Overlay Title for Map */}
-        <div className="absolute top-4 left-4 md:left-1/2 md:transform md:-translate-x-1/2 bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-md z-[400] flex items-center gap-2 pointer-events-none">
-            <Compass className="w-4 h-4 text-blue-600" />
-            <span className="text-sm font-semibold text-gray-700">Interactive Map</span>
-        </div>
       </div>
 
       {/* Chat Area */}
@@ -335,7 +371,7 @@ const App: React.FC = () => {
           {messages.map((msg, idx) => (
             <ChatMessage key={idx} message={msg} />
           ))}
-          {isLoading && (
+          {isLoading && messages[messages.length - 1].role === 'user' && (
             <div className="flex items-center gap-2 text-gray-400 text-sm ml-4 mb-4 animate-pulse">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 <span>Planning trip details...</span>

@@ -8,7 +8,8 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 export const sendMessageToGemini = async (
   history: Message[],
   newMessage: string,
-  userLocation?: Coordinates
+  userLocation?: Coordinates,
+  onStreamUpdate?: (text: string) => void
 ): Promise<{ text: string; groundingChunks: GroundingChunk[]; places: Place[] }> => {
   try {
     // Convert app history to API content format
@@ -38,7 +39,7 @@ export const sendMessageToGemini = async (
         };
     }
 
-    const response = await ai.models.generateContent({
+    const result = await ai.models.generateContentStream({
       model: modelName,
       contents: contents,
       config: {
@@ -101,11 +102,34 @@ export const sendMessageToGemini = async (
       },
     });
 
-    const candidate = response.candidates?.[0];
-    let text = candidate?.content?.parts?.map((p) => p.text).join("") || "No response generated.";
-    
-    // Extract grounding chunks if available
-    const groundingChunks = candidate?.groundingMetadata?.groundingChunks as GroundingChunk[] || [];
+    let fullText = "";
+    let groundingChunks: GroundingChunk[] = [];
+
+    // Iterate result directly. The new SDK returns an iterable for generateContentStream.
+    for await (const chunk of result) {
+      const chunkText = chunk.text;
+      if (chunkText) {
+        fullText += chunkText;
+        if (onStreamUpdate) {
+            // Check if we have hit the start of the JSON block to hide it from the stream view
+            // This prevents the user from seeing raw JSON construction
+            const jsonStart = fullText.indexOf("```json");
+            if (jsonStart !== -1) {
+                onStreamUpdate(fullText.substring(0, jsonStart));
+            } else {
+                onStreamUpdate(fullText);
+            }
+        }
+      }
+
+      // Extract grounding chunks from the current chunk if available
+      const candidate = chunk.candidates?.[0];
+      if (candidate?.groundingMetadata?.groundingChunks) {
+          groundingChunks = candidate.groundingMetadata.groundingChunks as unknown as GroundingChunk[];
+      }
+    }
+
+    let text = fullText || "No response generated.";
 
     // Extract JSON places from the text
     let places: Place[] = [];
